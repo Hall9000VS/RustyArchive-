@@ -1,0 +1,19 @@
+[package]
+name = "rustyarchive-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rustyarchive = { path = ".." }
+
+[[bin]]
+name = "vault_header_parser"
+path = "fuzz_targets/vault_header_parser.rs"
+test = false
+doc = false
+bench = false

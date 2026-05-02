@@ -1,4 +1,6 @@
 /target/
+/fuzz/target/
+/fuzz/Cargo.lock
 /demo.rav
 /restored/
 /sample-data/

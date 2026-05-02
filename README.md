@@ -57,3 +57,10 @@ cargo check
 cargo test
 cargo clippy --all-targets --all-features
 ```
+
+Header parser fuzz target:
+
+```bash
+cargo install cargo-fuzz
+cargo fuzz run vault_header_parser
+```

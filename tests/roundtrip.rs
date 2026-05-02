@@ -1,7 +1,8 @@
 use std::fs;
 
-use rustyarchive::archive::{pack_with_password, unpack_with_password};
+use rustyarchive::archive::{create_zip_payload, pack_with_password, unpack_with_password};
 use rustyarchive::cli::{PackArgs, UnpackArgs};
+use rustyarchive::manifest::build_manifest;
 use rustyarchive::vault_format::{FIXED_V1_HEADER_LENGTH, parse_header_from_file};
 
 #[test]
@@ -74,6 +75,24 @@ fn vault_bytes_are_non_deterministic_for_same_input() {
         fs::read(first_vault).expect("first vault"),
         fs::read(second_vault).expect("second vault")
     );
+}
+
+#[test]
+fn zip_payload_is_deterministic_for_same_input() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let input = temp.path().join("input");
+    fs::create_dir_all(input.join("b")).expect("nested dir");
+    fs::write(input.join("z.txt"), "last").expect("z file");
+    fs::write(input.join("a.txt"), "first").expect("a file");
+    fs::write(input.join("b").join("m.txt"), "middle").expect("nested file");
+
+    let first_manifest = build_manifest(&input).expect("first manifest");
+    let second_manifest = build_manifest(&input).expect("second manifest");
+    let first_payload = create_zip_payload(&input, &first_manifest).expect("first zip payload");
+    let second_payload = create_zip_payload(&input, &second_manifest).expect("second zip payload");
+
+    assert_eq!(first_manifest, second_manifest);
+    assert_eq!(first_payload, second_payload);
 }
 
 #[test]
