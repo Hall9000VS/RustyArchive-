@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,12 +12,13 @@ use crate::crypto::{
     CryptoParams, KdfParams, decrypt_payload, encrypt_payload_with_params, generate_crypto_params,
 };
 use crate::manifest::{
-    MANIFEST_ARCHIVE_PATH, Manifest, build_manifest, path_from_manifest_path,
-    validate_manifest_metadata, validate_manifest_path, verify_manifest,
+    MANIFEST_ARCHIVE_PATH, Manifest, ManifestSource, build_manifest_from_sources,
+    collect_manifest_sources, path_from_manifest_path, validate_manifest_metadata,
+    validate_manifest_path, verify_manifest,
 };
 use crate::vault_format::{
     COMPRESSION_ZIP, ENCRYPTION_XCHACHA20_POLY1305, FIXED_V1_HEADER_LENGTH, FORMAT_VERSION,
-    KDF_ARGON2ID, MAX_V0_1_CIPHERTEXT_LENGTH, VaultHeader, parse_header, parse_header_from_file,
+    KDF_ARGON2ID, MAX_V0_1_CIPHERTEXT_LENGTH, VaultHeader, parse_header_from_file,
     serialize_header,
 };
 
@@ -38,19 +39,26 @@ pub fn unpack(args: UnpackArgs) -> Result<()> {
 }
 
 pub fn info(args: InfoArgs) -> Result<()> {
-    let mut file = File::open(&args.input)?;
-    let mut header_bytes = vec![0u8; FIXED_V1_HEADER_LENGTH as usize];
-    file.read_exact(&mut header_bytes)?;
-
-    let header = parse_header(&header_bytes)?;
+    let file_bytes = fs::read(&args.input)
+        .with_context(|| format!("failed to read vault file: {}", args.input.display()))?;
+    let header = parse_header_from_file(&file_bytes)?;
     println!("{}", render_vault_info(&header));
 
     Ok(())
 }
 
 pub fn create_zip_payload(input: &Path, manifest: &Manifest) -> Result<Vec<u8>> {
+    let sources = collect_manifest_sources(input)?;
+    create_zip_payload_from_sources(&sources, manifest)
+}
+
+pub fn create_zip_payload_from_sources(
+    sources: &[ManifestSource],
+    manifest: &Manifest,
+) -> Result<Vec<u8>> {
     validate_manifest_metadata(manifest)?;
     ensure_manifest_size_within_v0_1_limit(manifest)?;
+    let source_index = source_index_by_manifest_path(sources)?;
 
     let cursor = Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(cursor);
@@ -59,8 +67,11 @@ pub fn create_zip_payload(input: &Path, manifest: &Manifest) -> Result<Vec<u8>> 
 
     for entry in &manifest.files {
         let manifest_path = validate_manifest_path(&entry.path)?;
-        let source_path = source_path_for_manifest_entry(input, &manifest_path)?;
-        let metadata = std::fs::metadata(&source_path).with_context(|| {
+        let source = source_index
+            .get(manifest_path.as_str())
+            .ok_or_else(|| anyhow::anyhow!("manifest source is missing: {manifest_path}"))?;
+        let source_path = &source.absolute_path;
+        let metadata = std::fs::metadata(source_path).with_context(|| {
             format!(
                 "failed to read source file metadata: {}",
                 source_path.display()
@@ -82,7 +93,7 @@ pub fn create_zip_payload(input: &Path, manifest: &Manifest) -> Result<Vec<u8>> 
         }
 
         zip.start_file(&manifest_path, options)?;
-        let mut source_file = File::open(&source_path)
+        let mut source_file = File::open(source_path)
             .with_context(|| format!("failed to open source file: {}", source_path.display()))?;
         std::io::copy(&mut source_file, &mut zip)
             .with_context(|| format!("failed to write ZIP entry: {manifest_path}"))?;
@@ -132,7 +143,9 @@ pub fn extract_zip_payload(payload: &[u8], output_dir: &Path) -> Result<()> {
         let validated_path = validate_zip_entry_path(&entry_name, is_directory)?;
 
         if is_zip_symlink(&entry) {
-            bail!("symlinks are not supported in v0.1: {validated_path}");
+            bail!(crate::error::RustyArchiveError::UnsupportedSymlink(
+                validated_path
+            ));
         }
 
         if is_directory {
@@ -180,14 +193,18 @@ pub fn pack_with_password(args: PackArgs, password: &str) -> Result<()> {
     let _ = args.no_progress;
     validate_pack_output(&args.output, args.overwrite)?;
 
-    let manifest = build_manifest(&args.input)?;
-    let zip_payload = create_zip_payload(&args.input, &manifest)?;
+    let sources = collect_manifest_sources(&args.input)?;
+    let manifest = build_manifest_from_sources(&sources)?;
+    let zip_payload = create_zip_payload_from_sources(&sources, &manifest)?;
     if zip_payload.len() as u64 > MAX_V0_1_ARCHIVE_BYTES {
         bail!("archive is too large for v0.1 in-memory mode");
     }
 
     let crypto_params = generate_crypto_params(KdfParams::default());
-    let header = header_for_crypto_params(&crypto_params, zip_payload.len() as u64 + 16)?;
+    let header = header_for_crypto_params(
+        &crypto_params,
+        zip_payload.len() as u64 + crate::crypto::XCHACHA20POLY1305_TAG_LENGTH as u64,
+    )?;
     let header_bytes = serialize_header(&header)?;
     let encrypted_payload =
         encrypt_payload_with_params(password, &zip_payload, &header_bytes, crypto_params)?;
@@ -200,7 +217,7 @@ pub fn pack_with_password(args: PackArgs, password: &str) -> Result<()> {
         Vec::with_capacity(header_bytes.len() + encrypted_payload.ciphertext.len());
     vault_bytes.extend_from_slice(&header_bytes);
     vault_bytes.extend_from_slice(&encrypted_payload.ciphertext);
-    write_file_atomically(&args.output, &vault_bytes, args.overwrite)?;
+    write_file_atomically(&args.output, &vault_bytes)?;
 
     Ok(())
 }
@@ -231,7 +248,7 @@ fn prompt_new_password() -> Result<String> {
 
     if password != confirmation {
         confirmation.zeroize();
-        bail!("passwords do not match");
+        bail!(crate::error::RustyArchiveError::PasswordMismatch);
     }
 
     confirmation.zeroize();
@@ -262,7 +279,7 @@ fn header_for_crypto_params(params: &CryptoParams, ciphertext_length: u64) -> Re
 
 fn validate_pack_output(output: &Path, overwrite: bool) -> Result<()> {
     if output.exists() && !overwrite {
-        bail!("output file already exists. Use --overwrite to replace it.");
+        bail!(crate::error::RustyArchiveError::OutputAlreadyExists);
     }
 
     if let Some(parent) = output.parent()
@@ -277,17 +294,21 @@ fn validate_pack_output(output: &Path, overwrite: bool) -> Result<()> {
 
 fn validate_unpack_output(output: &Path, overwrite: bool) -> Result<()> {
     if output.exists() && !overwrite {
-        bail!("output directory already exists. Use --overwrite to extract into it.");
+        bail!(crate::error::RustyArchiveError::OutputAlreadyExists);
     }
 
     if output.exists() && !output.is_dir() {
         bail!("unpack output path exists and is not a directory");
     }
 
+    if output.exists() && output.read_dir()?.next().is_some() {
+        bail!(crate::error::RustyArchiveError::OutputDirectoryNotEmpty);
+    }
+
     Ok(())
 }
 
-fn write_file_atomically(output: &Path, bytes: &[u8], overwrite: bool) -> Result<()> {
+fn write_file_atomically(output: &Path, bytes: &[u8]) -> Result<()> {
     let temp_path = temporary_output_path(output);
     {
         let mut temp_file = File::create(&temp_path).with_context(|| {
@@ -295,11 +316,6 @@ fn write_file_atomically(output: &Path, bytes: &[u8], overwrite: bool) -> Result
         })?;
         temp_file.write_all(bytes)?;
         temp_file.sync_all()?;
-    }
-
-    if overwrite && output.exists() {
-        fs::remove_file(output)
-            .with_context(|| format!("failed to replace existing vault: {}", output.display()))?;
     }
 
     fs::rename(&temp_path, output)
@@ -335,29 +351,10 @@ fn ensure_manifest_size_within_v0_1_limit(manifest: &Manifest) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("archive size overflow"))?;
 
     if total_size > MAX_V0_1_ARCHIVE_BYTES {
-        bail!("archive is too large for v0.1 in-memory mode");
+        bail!(crate::error::RustyArchiveError::ArchiveTooLarge);
     }
 
     Ok(())
-}
-
-fn source_path_for_manifest_entry(input: &Path, manifest_path: &str) -> Result<PathBuf> {
-    let metadata = std::fs::metadata(input)
-        .with_context(|| format!("failed to read input metadata: {}", input.display()))?;
-
-    if metadata.is_file() {
-        let file_name = input
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("input file has no file name: {}", input.display()))?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 paths are not supported in v0.1"))?;
-        if validate_manifest_path(file_name)? != manifest_path {
-            bail!("manifest path does not match input file name: {manifest_path}");
-        }
-        Ok(input.to_path_buf())
-    } else {
-        Ok(input.join(path_from_manifest_path(manifest_path)))
-    }
 }
 
 fn read_manifest_from_zip<R: Read + std::io::Seek>(
@@ -368,7 +365,9 @@ fn read_manifest_from_zip<R: Read + std::io::Seek>(
         .context("ZIP payload does not contain the required RustyArchive manifest")?;
 
     if is_zip_symlink(&manifest_file) {
-        bail!("manifest entry must not be a symlink");
+        bail!(crate::error::RustyArchiveError::UnsupportedSymlink(
+            MANIFEST_ARCHIVE_PATH.to_string()
+        ));
     }
 
     let mut manifest_json = String::new();
@@ -415,14 +414,31 @@ fn reject_symlink_ancestors(base: &Path, parent: &Path) -> Result<()> {
             )
         })?;
         if metadata.file_type().is_symlink() {
-            bail!(
-                "symlinks are not supported in extraction directories: {}",
-                current.display()
-            );
+            bail!(crate::error::RustyArchiveError::UnsupportedSymlink(
+                current.display().to_string()
+            ));
         }
     }
 
     Ok(())
+}
+
+fn source_index_by_manifest_path(
+    sources: &[ManifestSource],
+) -> Result<HashMap<String, &ManifestSource>> {
+    let mut source_index = HashMap::with_capacity(sources.len());
+
+    for source in sources {
+        let normalized_path = validate_manifest_path(&source.manifest_path)?;
+        if source_index
+            .insert(normalized_path.clone(), source)
+            .is_some()
+        {
+            bail!("duplicate manifest source path: {normalized_path}");
+        }
+    }
+
+    Ok(source_index)
 }
 
 fn render_vault_info(header: &VaultHeader) -> String {
@@ -441,22 +457,22 @@ fn render_vault_info(header: &VaultHeader) -> String {
 
 fn compression_name(value: u8) -> &'static str {
     match value {
-        1 => "zip",
-        _ => "unknown",
+        COMPRESSION_ZIP => "zip",
+        _ => unreachable!("vault header validation rejects unknown compression ids"),
     }
 }
 
 fn kdf_name(value: u8) -> &'static str {
     match value {
-        1 => "Argon2id",
-        _ => "unknown",
+        KDF_ARGON2ID => "Argon2id",
+        _ => unreachable!("vault header validation rejects unknown KDF ids"),
     }
 }
 
 fn encryption_name(value: u8) -> &'static str {
     match value {
-        1 => "XChaCha20-Poly1305",
-        _ => "unknown",
+        ENCRYPTION_XCHACHA20_POLY1305 => "XChaCha20-Poly1305",
+        _ => unreachable!("vault header validation rejects unknown encryption ids"),
     }
 }
 

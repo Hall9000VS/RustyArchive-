@@ -5,11 +5,14 @@ use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroize;
 
+use crate::error::RustyArchiveError;
+
 pub const DEFAULT_M_COST_KIB: u32 = 32_768;
 pub const DEFAULT_T_COST: u32 = 3;
 pub const DEFAULT_P_COST: u8 = 1;
 pub const SALT_LENGTH: usize = 32;
 pub const NONCE_LENGTH: usize = 24;
+pub const XCHACHA20POLY1305_TAG_LENGTH: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KdfParams {
@@ -105,9 +108,7 @@ pub fn decrypt_payload(
                 aad,
             },
         )
-        .map_err(|_| {
-            anyhow!("decryption failed. The password may be wrong or the vault may be corrupted.")
-        })?;
+        .map_err(|_| RustyArchiveError::DecryptionFailed)?;
     key.zeroize();
 
     Ok(plaintext)

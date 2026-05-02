@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::error::RustyArchiveError;
+
 pub const MANIFEST_VERSION: u8 = 1;
 pub const MANIFEST_ALGORITHM: &str = "sha256";
 pub const MANIFEST_PATH_ENCODING: &str = "utf-8-nfc-forward-slash";
@@ -40,15 +42,32 @@ pub struct ManifestEntry {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestSource {
+    pub absolute_path: PathBuf,
+    pub manifest_path: String,
+    pub size: u64,
+}
+
 pub fn build_manifest(input: &Path) -> Result<Manifest> {
+    let files = collect_manifest_sources(input)?;
+    build_manifest_from_sources(&files)
+}
+
+pub fn collect_manifest_sources(input: &Path) -> Result<Vec<ManifestSource>> {
     let input_metadata = std::fs::symlink_metadata(input)
         .with_context(|| format!("failed to read input metadata: {}", input.display()))?;
 
     if input_metadata.file_type().is_symlink() {
-        bail!("symlinks are not supported in v0.1: {}", input.display());
+        bail!(RustyArchiveError::UnsupportedSymlink(
+            input.display().to_string()
+        ));
     }
 
-    let files = collect_regular_files(input, &input_metadata)?;
+    collect_regular_files(input, &input_metadata)
+}
+
+pub fn build_manifest_from_sources(files: &[ManifestSource]) -> Result<Manifest> {
     let entries = files
         .par_iter()
         .map(|file| {
@@ -153,6 +172,10 @@ pub fn validate_manifest_path(path: &str) -> Result<String> {
             bail!("manifest path contains an unsafe component: {path}");
         }
 
+        if component.contains('\0') {
+            bail!("manifest path contains a NUL byte: {path:?}");
+        }
+
         if component.contains(':') {
             bail!("manifest path contains a Windows path prefix or stream marker: {path}");
         }
@@ -168,7 +191,7 @@ pub fn validate_manifest_path(path: &str) -> Result<String> {
         components.push(component);
     }
 
-    if components.first() == Some(&".rustyarchive") {
+    if components.contains(&".rustyarchive") {
         bail!("manifest path uses RustyArchive reserved metadata directory: {path}");
     }
 
@@ -179,14 +202,10 @@ pub fn path_from_manifest_path(path: &str) -> PathBuf {
     path.split('/').collect()
 }
 
-#[derive(Debug, Clone)]
-struct InputFile {
-    absolute_path: PathBuf,
-    manifest_path: String,
-    size: u64,
-}
-
-fn collect_regular_files(input: &Path, metadata: &std::fs::Metadata) -> Result<Vec<InputFile>> {
+fn collect_regular_files(
+    input: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<Vec<ManifestSource>> {
     let mut files = Vec::new();
 
     if metadata.is_file() {
@@ -195,7 +214,7 @@ fn collect_regular_files(input: &Path, metadata: &std::fs::Metadata) -> Result<V
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("input file has no file name: {}", input.display()))?;
         let manifest_path = normalize_path_components([file_name])?;
-        files.push(InputFile {
+        files.push(ManifestSource {
             absolute_path: input.to_path_buf(),
             manifest_path,
             size: metadata.len(),
@@ -209,7 +228,9 @@ fn collect_regular_files(input: &Path, metadata: &std::fs::Metadata) -> Result<V
             let file_type = entry_metadata.file_type();
 
             if file_type.is_symlink() {
-                bail!("symlinks are not supported in v0.1: {}", path.display());
+                bail!(RustyArchiveError::UnsupportedSymlink(
+                    path.display().to_string()
+                ));
             }
 
             if entry_metadata.is_dir() {
@@ -230,7 +251,7 @@ fn collect_regular_files(input: &Path, metadata: &std::fs::Metadata) -> Result<V
                 .with_context(|| format!("failed to relativize path: {}", path.display()))?;
             let manifest_path = normalize_relative_path(relative_path)?;
 
-            files.push(InputFile {
+            files.push(ManifestSource {
                 absolute_path: path.to_path_buf(),
                 manifest_path,
                 size: entry_metadata.len(),

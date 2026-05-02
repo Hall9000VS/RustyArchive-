@@ -22,7 +22,7 @@ pub struct PackArgs {
     pub input: PathBuf,
     #[arg(short, long)]
     pub output: PathBuf,
-    #[arg(long)]
+    #[arg(long, help = "Replace an existing .rav output file")]
     pub overwrite: bool,
     #[arg(long)]
     pub no_progress: bool,
@@ -33,7 +33,10 @@ pub struct UnpackArgs {
     pub input: PathBuf,
     #[arg(short, long)]
     pub output: PathBuf,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Allow extracting into an existing empty directory; non-empty directories are rejected"
+    )]
     pub overwrite: bool,
     #[arg(long)]
     pub no_progress: bool,

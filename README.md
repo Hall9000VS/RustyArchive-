@@ -26,7 +26,8 @@ Inspect unauthenticated header metadata:
 rustyarchive info backup.rav
 ```
 
-Use `--overwrite` when replacing an existing vault or extracting into an existing directory.
+Use `--overwrite` to replace an existing vault file during `pack`.
+For `unpack`, `--overwrite` only allows extraction into an existing empty directory; non-empty directories are rejected to avoid silent merge restores.
 
 ## Features
 
@@ -40,6 +41,8 @@ Use `--overwrite` when replacing an existing vault or extracting into an existin
 - Safe extraction with conservative path validation
 - Explicit symlink rejection
 - Atomic vault output writes via temporary file and rename
+
+Default Argon2id parameters in v0.1 are `m=32 MiB`, `t=3`, `p=1`.
 
 ## Current Limitations
 

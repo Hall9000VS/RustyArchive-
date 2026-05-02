@@ -3,7 +3,7 @@ use std::fs;
 use rustyarchive::archive::{create_zip_payload, pack_with_password, unpack_with_password};
 use rustyarchive::cli::{PackArgs, UnpackArgs};
 use rustyarchive::manifest::build_manifest;
-use rustyarchive::vault_format::{FIXED_V1_HEADER_LENGTH, parse_header_from_file};
+use rustyarchive::vault_format::parse_header_from_file;
 
 #[test]
 fn packs_and_unpacks_a_folder_roundtrip() {
@@ -96,6 +96,22 @@ fn zip_payload_is_deterministic_for_same_input() {
 }
 
 #[test]
+fn pack_uses_original_source_path_for_normalized_manifest_names() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let input = temp.path().join("input");
+    fs::create_dir_all(&input).expect("input dir");
+    let nfd_name = "cafe\u{301}.txt";
+    fs::write(input.join(nfd_name), "accented").expect("nfd file");
+
+    let manifest = build_manifest(&input).expect("manifest");
+    assert_eq!(manifest.files[0].path, "café.txt");
+
+    let payload = create_zip_payload(&input, &manifest).expect("zip payload");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(payload)).expect("zip archive");
+    archive.by_name("café.txt").expect("normalized zip entry");
+}
+
+#[test]
 fn wrong_password_fails_before_extraction() {
     let temp = tempfile::tempdir().expect("temp dir");
     let input = temp.path().join("input");
@@ -131,6 +147,67 @@ fn wrong_password_fails_before_extraction() {
 }
 
 #[test]
+fn unpack_rejects_non_empty_output_directory_even_with_overwrite() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let input = temp.path().join("input");
+    fs::create_dir_all(&input).expect("input dir");
+    fs::write(input.join("file.txt"), "vault").expect("input file");
+
+    let vault = temp.path().join("backup.rav");
+    pack_with_password(
+        PackArgs {
+            input,
+            output: vault.clone(),
+            overwrite: false,
+            no_progress: true,
+        },
+        "password",
+    )
+    .expect("pack should succeed");
+
+    let restored = temp.path().join("restored");
+    fs::create_dir_all(&restored).expect("restored dir");
+    fs::write(restored.join("orphan.txt"), "stale").expect("orphan file");
+
+    let error = unpack_with_password(
+        UnpackArgs {
+            input: vault,
+            output: restored,
+            overwrite: true,
+            no_progress: true,
+        },
+        "password",
+    )
+    .expect_err("non-empty output should fail");
+
+    assert!(error.to_string().contains("not empty"));
+}
+
+#[test]
+fn pack_overwrite_replaces_existing_vault_atomically() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let input = temp.path().join("input");
+    fs::create_dir_all(&input).expect("input dir");
+    fs::write(input.join("file.txt"), "vault").expect("input file");
+
+    let vault = temp.path().join("backup.rav");
+    fs::write(&vault, "old vault").expect("old vault");
+
+    pack_with_password(
+        PackArgs {
+            input,
+            output: vault.clone(),
+            overwrite: true,
+            no_progress: true,
+        },
+        "password",
+    )
+    .expect("pack overwrite should succeed");
+
+    parse_header_from_file(&fs::read(vault).expect("new vault")).expect("new vault header");
+}
+
+#[test]
 fn tampering_with_authenticated_header_is_detected() {
     let temp = tempfile::tempdir().expect("temp dir");
     let input = temp.path().join("input");
@@ -151,7 +228,7 @@ fn tampering_with_authenticated_header_is_detected() {
 
     let mut bytes = fs::read(&vault).expect("vault bytes");
     parse_header_from_file(&bytes).expect("header before tamper");
-    bytes[FIXED_V1_HEADER_LENGTH as usize - 1] ^= 0x01;
+    bytes[15] ^= 0x01;
     fs::write(&vault, bytes).expect("tampered vault");
 
     let error = unpack_with_password(
