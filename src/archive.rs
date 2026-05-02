@@ -293,12 +293,12 @@ fn validate_pack_output(output: &Path, overwrite: bool) -> Result<()> {
 }
 
 fn validate_unpack_output(output: &Path, overwrite: bool) -> Result<()> {
-    if output.exists() && !overwrite {
-        bail!(crate::error::RustyArchiveError::OutputAlreadyExists);
-    }
-
     if output.exists() && !output.is_dir() {
         bail!("unpack output path exists and is not a directory");
+    }
+
+    if output.exists() && !overwrite {
+        bail!(crate::error::RustyArchiveError::OutputAlreadyExists);
     }
 
     if output.exists() && output.read_dir()?.next().is_some() {

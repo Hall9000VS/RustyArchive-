@@ -191,7 +191,10 @@ pub fn validate_manifest_path(path: &str) -> Result<String> {
         components.push(component);
     }
 
-    if components.contains(&".rustyarchive") {
+    if components
+        .iter()
+        .any(|component| component.eq_ignore_ascii_case(".rustyarchive"))
+    {
         bail!("manifest path uses RustyArchive reserved metadata directory: {path}");
     }
 

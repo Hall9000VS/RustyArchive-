@@ -184,6 +184,45 @@ fn unpack_rejects_non_empty_output_directory_even_with_overwrite() {
 }
 
 #[test]
+fn unpack_reports_file_output_path_before_overwrite_hint() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let input = temp.path().join("input");
+    fs::create_dir_all(&input).expect("input dir");
+    fs::write(input.join("file.txt"), "vault").expect("input file");
+
+    let vault = temp.path().join("backup.rav");
+    pack_with_password(
+        PackArgs {
+            input,
+            output: vault.clone(),
+            overwrite: false,
+            no_progress: true,
+        },
+        "password",
+    )
+    .expect("pack should succeed");
+
+    let output_file = temp.path().join("restored-as-file");
+    fs::write(&output_file, "not a directory").expect("output file");
+
+    let error = unpack_with_password(
+        UnpackArgs {
+            input: vault,
+            output: output_file,
+            overwrite: false,
+            no_progress: true,
+        },
+        "password",
+    )
+    .expect_err("file output path should fail before overwrite hint");
+
+    assert_eq!(
+        error.to_string(),
+        "unpack output path exists and is not a directory"
+    );
+}
+
+#[test]
 fn pack_overwrite_replaces_existing_vault_atomically() {
     let temp = tempfile::tempdir().expect("temp dir");
     let input = temp.path().join("input");

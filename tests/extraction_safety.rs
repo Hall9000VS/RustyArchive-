@@ -83,6 +83,20 @@ fn rejects_nested_rustyarchive_metadata_paths() {
 }
 
 #[test]
+fn rejects_reserved_rustyarchive_metadata_paths_case_insensitively() {
+    for path in [
+        ".RustyArchive/foo",
+        ".RUSTYARCHIVE/foo",
+        "a/.Rustyarchive/foo",
+    ] {
+        let error = validate_manifest_path(path)
+            .expect_err("metadata path should be reserved regardless of ASCII case");
+
+        assert!(error.to_string().contains("reserved metadata directory"));
+    }
+}
+
+#[test]
 fn rejects_nul_bytes_in_manifest_paths() {
     let error = validate_manifest_path("a\0b.txt").expect_err("NUL path should fail validation");
 
